@@ -39,12 +39,26 @@ def fetch_ura(date_str: str):
         log.warning("URA_ACCESS_KEY missing — skipping URA")
         return
     client = URAClient(access_key=key)
+
+    # Resale + sub-sale transactions (4 batches, ~36 months)
     txns = client.fetch_residential_transactions()
     split = client.split_condo_landed(txns)
     write_snapshot(date_str, "ura-condo-transactions", split["condo"])
     write_snapshot(date_str, "ura-landed-transactions", split["landed"])
-    rentals = client.fetch_residential_rentals()
+
+    # Rentals — last 6 quarters via refPeriod=YYqQ
+    rentals = client.fetch_residential_rentals(quarters=6)
     write_snapshot(date_str, "ura-rentals", rentals)
+
+    # New-launch universe + monthly developer-sales digest
+    pipeline = client.fetch_pipeline()
+    write_snapshot(date_str, "ura-pipeline", pipeline)
+
+    dev_sales, dev_periods = client.fetch_developer_sales(months=6)
+    write_snapshot(date_str, "ura-developer-sales", {
+        "refPeriods": dev_periods,
+        "records": dev_sales,
+    })
 
 
 def fetch_datagov(date_str: str):
