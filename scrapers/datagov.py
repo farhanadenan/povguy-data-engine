@@ -5,8 +5,10 @@ We pass the API key via the `x-api-key` header on every request. Without
 the header, data.gov.sg rate-limits us at ~10k records/day with HTTP 429.
 With the header we can paginate through full datasets (250k+ records).
 
-This matches how POV Guy Site/POVGUY V2/hdb-market.html consumes the data live:
-    https://data.gov.sg/api/action/datastore_search?resource_id=...&limit=5000
+Retry policy: we retry **per page**, not the whole pagination loop. The
+previous design wrapped `fetch_dataset` in `@retry`, which meant any
+transient HTTPError mid-pagination restarted us from offset 0 and never
+made progress (we'd just hit the same wall three times).
 
 Reference:
 - https://guide.data.gov.sg/developer-guide/dataset-apis
@@ -16,7 +18,7 @@ import logging
 import time
 import requests
 from typing import Dict, List
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 logger = logging.getLogger(__name__)
 
@@ -42,14 +44,30 @@ class DataGovClient:
         else:
             logger.warning("DATAGOV_API_KEY not set — rate-limited at ~10k records")
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=10))
-    def fetch_dataset(self, dataset_key: str, limit: int = 5000, sort: str = "") -> List[Dict]:
-        """Fetch all records from a dataset, paginating with `offset`.
+    @retry(
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(min=2, max=30),
+        retry=retry_if_exception_type((requests.HTTPError, requests.ConnectionError, requests.Timeout)),
+        reraise=True,
+    )
+    def _fetch_page(self, resource_id: str, limit: int, offset: int, sort: str = "") -> Dict:
+        """Fetch ONE page. Retries only this page on transient errors."""
+        params = {"resource_id": resource_id, "limit": limit, "offset": offset}
+        if sort:
+            params["sort"] = sort
+        res = self.session.get(V1_BASE, params=params, timeout=60)
+        # Surface 429s as retryable
+        if res.status_code == 429:
+            res.raise_for_status()
+        res.raise_for_status()
+        body = res.json()
+        if not body.get("success"):
+            raise RuntimeError(f"data.gov.sg returned success=false: {body}")
+        return body.get("result", {})
 
-        We deliberately don't pass a `sort` param by default — data.gov.sg's
-        sort parameter occasionally returns inconsistent paging cursors on
-        large datasets, leading to duplicates or skipped pages.
-        """
+    def fetch_dataset(self, dataset_key: str, limit: int = 5000, sort: str = "") -> List[Dict]:
+        """Fetch all records, paginating with `offset`. Page-level retries
+        ensure a transient blip doesn't reset our progress."""
         resource_id = DATASETS.get(dataset_key, dataset_key)
         if resource_id == dataset_key and dataset_key not in DATASETS:
             logger.warning(f"Unknown dataset key '{dataset_key}' — treating as raw resource_id")
@@ -57,21 +75,18 @@ class DataGovClient:
         all_records: List[Dict] = []
         offset = 0
         while True:
-            params = {
-                "resource_id": resource_id,
-                "limit": limit,
-                "offset": offset,
-            }
-            if sort:
-                params["sort"] = sort
-            res = self.session.get(V1_BASE, params=params, timeout=60)
-            res.raise_for_status()
-            body = res.json()
-            if not body.get("success"):
-                raise RuntimeError(f"data.gov.sg returned success=false: {body}")
-            records = body.get("result", {}).get("records", [])
+            try:
+                result = self._fetch_page(resource_id, limit, offset, sort)
+            except Exception as e:
+                logger.error(f"  {dataset_key}: page at offset={offset} failed permanently: {e}")
+                # Return what we have so far — partial data is better than nothing
+                if all_records:
+                    logger.warning(f"  {dataset_key}: returning {len(all_records):,} partial records")
+                    return all_records
+                raise
+            records = result.get("records", [])
             all_records.extend(records)
-            total = body.get("result", {}).get("total", 0)
+            total = result.get("total", 0)
             logger.info(f"  {dataset_key}: fetched {len(all_records):,}/{total:,}")
             if len(records) < limit or len(all_records) >= total:
                 break
