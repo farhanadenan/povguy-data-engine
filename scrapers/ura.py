@@ -12,7 +12,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 logger = logging.getLogger(__name__)
 
 TOKEN_URL = "https://eservice.ura.gov.sg/uraDataService/insertNewToken/v1"
-DATA_URL = "https://www.ura.gov.sg/uraDataService/invokeUraDS"
+DATA_URL = "https://eservice.ura.gov.sg/uraDataService/invokeUraDS/v1"
 
 UA = "Mozilla/5.0 (compatible; PovGuyDataEngine/0.1)"
 
