@@ -1,15 +1,17 @@
 """
-data.gov.sg v2 scraper.
+data.gov.sg scraper — uses the public v1 datastore_search endpoint.
 
-The v2 API uses a poll-download flow for large datasets:
-  1. POST /v2/public/api/datasets/{id}/initiate-download   → returns download_url (signed)
-  2. GET that signed URL to get the JSON/CSV
-For smaller datasets (and the catalog), simple GET works.
+This matches how POV Guy Site/POVGUY V2/hdb-market.html consumes the data live:
+    https://data.gov.sg/api/action/datastore_search?resource_id=...&limit=5000
 
-Reference: https://data.gov.sg/developer
+The v1 endpoint requires NO authentication, has no rate limit issues for our
+batch sizes, and is the same source that powers Singapore's open-data portal.
+
+We previously tried the v2 API which requires an api key and uses a clunky
+poll-download flow — both unnecessary for our use case.
+
+Reference: https://guide.data.gov.sg/developer-guide/dataset-apis
 """
-import os
-import time
 import logging
 import requests
 from typing import Dict, List
@@ -17,56 +19,50 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 logger = logging.getLogger(__name__)
 
-BASE = "https://api-production.data.gov.sg/v2/public"
+V1_BASE = "https://data.gov.sg/api/action/datastore_search"
 
-# Known dataset IDs for SG property
+# Resource IDs (from the data.gov.sg dataset pages)
 DATASETS = {
-    "hdb-resale": "d_8b84c4ee58e3cfc0ece0d773c8ca6abc",  # Resale flat prices (2017+)
-    "hdb-rental": "d_c9f57187485a850908655db0e8cfe651",  # Renting out of HDB flats
-    "bto-launch": "d_7c7b0e2ec56693b09f7c19a83a1e9b54",  # Sale of BTO flats subscription
+    # HDB Resale Flat Prices (Jan 2017 onwards) — confirmed in hdb-market.html
+    "hdb-resale": "f1765b54-a209-4718-8d38-a39237f502b3",
+    # TODO: confirm these resource IDs from the dataset pages on data.gov.sg
+    # "hdb-rental": "<resource_id>",
+    # "bto-launch": "<resource_id>",
 }
 
 
 class DataGovClient:
     def __init__(self, api_key: str = ""):
-        self.api_key = api_key
+        # api_key kept for backwards compat with main.py — v1 doesn't use it
         self.session = requests.Session()
-        if api_key:
-            # data.gov.sg v2 accepts the key as a query parameter on poll-download
-            # for some endpoints, or as x-api-key header. We try both.
-            self.session.headers.update({"x-api-key": api_key})
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=10))
-    def _initiate(self, dataset_id: str) -> str:
-        url = f"{BASE}/api/datasets/{dataset_id}/initiate-download"
-        res = self.session.post(url, timeout=30)
-        res.raise_for_status()
-        body = res.json()
-        # Poll until ready
+    def fetch_dataset(self, dataset_key: str, limit: int = 5000, sort: str = "month desc") -> List[Dict]:
+        """Fetch all records from a dataset, paginating if needed."""
+        resource_id = DATASETS.get(dataset_key, dataset_key)
+        if resource_id == dataset_key and dataset_key not in DATASETS:
+            logger.warning(f"Unknown dataset key '{dataset_key}' — treating as raw resource_id")
+
+        all_records: List[Dict] = []
+        offset = 0
         while True:
-            poll = self.session.get(f"{BASE}/api/datasets/{dataset_id}/poll-download", timeout=30)
-            pdata = poll.json()
-            if pdata.get("data", {}).get("status") == "READY":
-                return pdata["data"]["url"]
-            time.sleep(2)
-
-    def fetch_dataset(self, dataset_key: str, limit: int = 10_000) -> List[Dict]:
-        ds_id = DATASETS.get(dataset_key, dataset_key)
-        try:
-            download_url = self._initiate(ds_id)
-            res = self.session.get(download_url, timeout=60)
+            params = {
+                "resource_id": resource_id,
+                "limit": limit,
+                "offset": offset,
+            }
+            if sort:
+                params["sort"] = sort
+            res = self.session.get(V1_BASE, params=params, timeout=60)
             res.raise_for_status()
-            # Could be CSV or JSON depending on dataset; assume JSON for now
-            return res.json() if "json" in res.headers.get("content-type", "") else res.text
-        except Exception as e:
-            logger.warning(f"data.gov.sg fetch failed for {dataset_key}: {e}")
-            # Fallback to old v1 resource_id-based API for HDB resale
-            if dataset_key == "hdb-resale":
-                return self._v1_fallback("d_8b84c4ee58e3cfc0ece0d773c8ca6abc", limit)
-            return []
-
-    def _v1_fallback(self, resource_id: str, limit: int = 10_000) -> List[Dict]:
-        url = "https://data.gov.sg/api/action/datastore_search"
-        res = requests.get(url, params={"resource_id": resource_id, "limit": limit}, timeout=60)
-        res.raise_for_status()
-        return res.json().get("result", {}).get("records", [])
+            body = res.json()
+            if not body.get("success"):
+                raise RuntimeError(f"data.gov.sg returned success=false: {body}")
+            records = body.get("result", {}).get("records", [])
+            all_records.extend(records)
+            total = body.get("result", {}).get("total", 0)
+            logger.info(f"  {dataset_key}: fetched {len(all_records)}/{total}")
+            if len(records) < limit or len(all_records) >= total:
+                break
+            offset += limit
+        return all_records
