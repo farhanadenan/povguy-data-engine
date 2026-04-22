@@ -40,6 +40,13 @@ jobs:
 
       - name: Bundle snapshot
         run: |
+          if [ ! -d "snapshots/$SNAPSHOT_DATE" ]; then
+            echo "::error::No snapshot directory at snapshots/$SNAPSHOT_DATE — scrapers wrote nothing. Check scraper logs."
+            ls -la snapshots/ 2>/dev/null || echo "snapshots/ doesn't exist"
+            exit 1
+          fi
+          echo "Files in snapshot:"
+          ls -lh snapshots/$SNAPSHOT_DATE/
           tar -czf snapshot-$SNAPSHOT_DATE.tar.gz -C snapshots/$SNAPSHOT_DATE .
           ls -lh snapshot-$SNAPSHOT_DATE.tar.gz
 

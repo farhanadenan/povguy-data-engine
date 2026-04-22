@@ -85,10 +85,11 @@ def main():
     log.info(f"Snapshot date: {date_str}")
 
     sources = []
-    if args.all or not args.source:
+    if args.all or not args.source or args.source == "all":
         sources = ["ura", "datagov", "appscript"]
     else:
         sources = [args.source]
+    log.info(f"Sources to fetch: {sources}")
 
     if "ura" in sources:
         fetch_ura(date_str)
