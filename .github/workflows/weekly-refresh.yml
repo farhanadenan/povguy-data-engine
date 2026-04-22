@@ -50,10 +50,16 @@ jobs:
           tar -czf snapshot-$SNAPSHOT_DATE.tar.gz -C snapshots/$SNAPSHOT_DATE .
           ls -lh snapshot-$SNAPSHOT_DATE.tar.gz
 
-      - name: Create GitHub Release
+      - name: Create or replace GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # Re-running the same day (manual dispatch, debug retry, etc.) must overwrite
+          # the previous snapshot — content-engine always pulls the latest tag for that date.
+          if gh release view snapshot-$SNAPSHOT_DATE >/dev/null 2>&1; then
+            echo "Existing release snapshot-$SNAPSHOT_DATE found — deleting before recreate"
+            gh release delete snapshot-$SNAPSHOT_DATE --yes --cleanup-tag
+          fi
           gh release create snapshot-$SNAPSHOT_DATE \
             snapshot-$SNAPSHOT_DATE.tar.gz \
             --title "Snapshot $SNAPSHOT_DATE" \
