@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 
 from scrapers.ura import URAClient
 from scrapers.datagov import DataGovClient
-from scrapers.appscript import AppScriptClient
+from scrapers.distress import DistressRadarClient
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -74,20 +74,30 @@ def fetch_datagov(date_str: str):
 
 
 def fetch_appscript(date_str: str):
-    endpoints = {
-        "new-launch": os.getenv("APPSCRIPT_NEW_LAUNCH"),
-        "condo-analysis": os.getenv("APPSCRIPT_CONDO_ANALYSIS"),
-        "rental-yield": os.getenv("APPSCRIPT_RENTAL_YIELD"),
-        "distress-radar": os.getenv("APPSCRIPT_DISTRESS_RADAR"),
-    }
-    endpoints = {k: v for k, v in endpoints.items() if v}
-    if not endpoints:
-        log.warning("No Apps Script endpoints configured")
-        return
-    client = AppScriptClient(endpoints)
-    data = client.fetch_all()
-    for name, payload in data.items():
-        write_snapshot(date_str, f"appscript-{name}", payload)
+    """Apps Script feeds + the public Distress Radar HTML on povguy.sg.
+
+    The Apps Script web-app for distress-radar is a heartbeat-only stub —
+    the actual data lives in static HTML snapshots that the
+    povguy-distress-radar skill publishes weekly to povguy.sg/dash/.
+    We fetch the latest of those and write it as appscript-distress-radar.json
+    so content-engine doesn't have to know the difference.
+
+    The other 3 Apps Script feeds (new-launch, condo-analysis, rental-yield)
+    duplicate URA — we don't fetch them.
+    """
+    distress_client = DistressRadarClient()
+    snap_date, sections = distress_client.fetch_latest()
+    if sections:
+        payload = {
+            "source": "povguy.sg/dash",
+            "snapshot_date": snap_date.isoformat(),
+            "fetched_at": datetime.now().isoformat(),
+            "sections": sections,
+            "total_listings": sum(s.get("count", 0) for s in sections),
+        }
+        write_snapshot(date_str, "appscript-distress-radar", payload)
+    else:
+        log.warning("Distress Radar: no snapshot found in lookback window")
 
 
 def main():
