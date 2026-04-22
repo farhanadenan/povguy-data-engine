@@ -1,0 +1,62 @@
+name: Weekly Data Refresh
+
+on:
+  schedule:
+    # Sunday 22:00 SGT = Sunday 14:00 UTC
+    - cron: '0 14 * * 0'
+  workflow_dispatch:
+    inputs:
+      source:
+        description: 'Source to refresh (ura | datagov | appscript | all)'
+        required: false
+        default: 'all'
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # for creating release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+
+      - name: Install
+        run: pip install -r requirements.txt
+
+      - name: Run scrapers
+        env:
+          URA_ACCESS_KEY: ${{ secrets.URA_ACCESS_KEY }}
+          DATAGOV_API_KEY: ${{ secrets.DATAGOV_API_KEY }}
+          APPSCRIPT_NEW_LAUNCH: ${{ secrets.APPSCRIPT_NEW_LAUNCH }}
+          APPSCRIPT_CONDO_ANALYSIS: ${{ secrets.APPSCRIPT_CONDO_ANALYSIS }}
+          APPSCRIPT_RENTAL_YIELD: ${{ secrets.APPSCRIPT_RENTAL_YIELD }}
+          APPSCRIPT_DISTRESS_RADAR: ${{ secrets.APPSCRIPT_DISTRESS_RADAR }}
+          SNAPSHOTS_DIR: ./snapshots
+        run: |
+          DATE=$(TZ=Asia/Singapore date +%Y-%m-%d)
+          echo "SNAPSHOT_DATE=$DATE" >> $GITHUB_ENV
+          python main.py --source ${{ github.event.inputs.source || 'all' }} --date $DATE
+
+      - name: Bundle snapshot
+        run: |
+          tar -czf snapshot-$SNAPSHOT_DATE.tar.gz -C snapshots/$SNAPSHOT_DATE .
+          ls -lh snapshot-$SNAPSHOT_DATE.tar.gz
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create snapshot-$SNAPSHOT_DATE \
+            snapshot-$SNAPSHOT_DATE.tar.gz \
+            --title "Snapshot $SNAPSHOT_DATE" \
+            --notes "Weekly snapshot from URA + data.gov.sg + Apps Script feeds." \
+            --latest
+
+      - name: Trigger content-engine for next 7 days
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          gh workflow run daily-content.yml \
+            --repo farhanadenan/povguy-content-engine \
+            -f date=$SNAPSHOT_DATE
