@@ -63,7 +63,9 @@ def fetch_ura(date_str: str):
 
 def fetch_datagov(date_str: str):
     client = DataGovClient(api_key=os.getenv("DATAGOV_API_KEY", ""))
-    for key in ("hdb-resale", "hdb-rental", "bto-launch"):
+    # bto-launch intentionally excluded — no stable data.gov.sg resource ID;
+    # URA pipeline + developer-sales feeds cover new launches.
+    for key in ("hdb-resale", "hdb-rental"):
         try:
             data = client.fetch_dataset(key)
             write_snapshot(date_str, f"datagov-{key}", data)
